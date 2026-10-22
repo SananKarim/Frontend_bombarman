@@ -1,0 +1,171 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>NEON BOMBER — Arcade</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+  <div id="game-shell">
+
+    <!-- ======= Top HUD ======= -->
+    <header id="hud">
+      <div class="hud-item">SCORE <span id="hud-score" class="hud-value">0</span></div>
+      <div class="hud-item">LEVEL <span id="hud-level" class="hud-value">1</span></div>
+      <div class="hud-item">LIVES <span id="hud-lives" class="hud-value lives">♥♥♥</span></div>
+      <div class="hud-item">ENEMIES <span id="hud-enemies" class="hud-value">3</span></div>
+      <div class="hud-item">BOMBS <span id="hud-bombs" class="hud-value">2/2</span></div>
+      <div class="hud-item">NEXT <span id="hud-progress" class="hud-value progress">—</span></div>
+      <div id="hud-power" class="hud-item">
+        <span id="hud-turbo" class="power-badge cyan off">TURBO 0.0s</span>
+        <span id="hud-tosser" class="power-badge orange off">TOSS [Z]</span>
+        <span id="hud-shield" class="power-badge violet off">SHIELD</span>
+        <span id="hud-warp" class="power-badge blue off">WARP 0.0s</span>
+        <span id="hud-chaos" class="power-badge red off">OVERCHARGE 0.0s</span>
+        <span id="hud-drone" class="power-badge green off">DRONE 0.0s</span>
+      </div>
+      <button id="fullscreen-toggle" type="button" aria-label="Toggle fullscreen" title="Fullscreen">⛶</button>
+      <button id="sound-toggle" type="button" aria-label="Toggle sound">🔊</button>
+    </header>
+
+    <!-- ======= Game area ======= -->
+    <div id="board-wrap">
+      <canvas id="game-canvas" width="720" height="624"></canvas>
+      <div id="br-live" class="hidden">
+        <span id="br-alive">ALIVE —</span>
+        <div class="feed" id="br-feed"></div>
+      </div>
+
+      <!-- Overlays (start / pause / game over / victory) -->
+      <!-- ======= Main menu ======= -->
+      <div id="overlay-start" class="overlay">
+        <h1 class="neon-title">NEON<br>BOMBER</h1>
+        <p class="overlay-sub">Cosmic Chaos edition — campaign &amp; battle royale.</p>
+        <div class="menu-stack">
+          <button id="btn-campaign" class="arcade-btn" type="button">▶ CAMPAIGN</button>
+          <button id="btn-multiplayer" class="arcade-btn secondary" type="button">🌐 MULTIPLAYER</button>
+          <button id="btn-settings-open" class="arcade-btn ghost" type="button">SETTINGS</button>
+          <button id="btn-controls-open" class="arcade-btn ghost" type="button">CONTROLS</button>
+        </div>
+      </div>
+
+      <div id="overlay-controls" class="overlay hidden">
+        <h2 class="neon-title small">CONTROLS</h2>
+        <div class="controls-hint">
+          <p><b>Move</b> — Arrow keys / WASD</p>
+          <p><b>Place bomb</b> — Space</p>
+          <p><b>Throw bomb</b> — Z (needs Bomb Tosser)</p>
+          <p><b>Pause / resume</b> — P or Esc</p>
+          <p><b>Fullscreen</b> — F or the ⛶ button</p>
+          <p><b>Restart</b> — R (asks to confirm first)</p>
+          <p><b>Touch</b> — D-pad · 💣 place · 🎯 throw</p>
+        </div>
+        <button id="btn-controls-back" class="arcade-btn" type="button">BACK</button>
+      </div>
+
+      <div id="overlay-settings" class="overlay hidden">
+        <h2 class="neon-title small">SETTINGS</h2>
+        <div class="menu-stack">
+          <button id="btn-settings-sound" class="arcade-btn ghost" type="button">SOUND: ON</button>
+          <button id="btn-settings-fullscreen" class="arcade-btn ghost" type="button">FULLSCREEN: OFF</button>
+        </div>
+        <button id="btn-settings-back" class="arcade-btn" type="button">BACK</button>
+      </div>
+
+      <!-- ======= Multiplayer lobby (driven by mp.js) ======= -->
+      <div id="overlay-lobby" class="overlay hidden">
+        <h2 class="neon-title small">MULTIPLAYER</h2>
+        <div id="lobby-home" class="menu-stack">
+          <input id="lobby-name" class="lobby-input" type="text" maxlength="14" placeholder="YOUR NAME" autocomplete="off">
+          <button id="btn-host-room" class="arcade-btn" type="button">HOST A ROOM</button>
+          <input id="lobby-code" class="lobby-input" type="text" maxlength="6" placeholder="ROOM CODE" autocomplete="off">
+          <button id="btn-join-room" class="arcade-btn secondary" type="button">JOIN ROOM</button>
+        </div>
+        <div id="lobby-room" class="hidden">
+          <p class="overlay-sub">ROOM CODE <span id="lobby-room-code" class="code-chip">------</span>
+            <button id="btn-copy-code" class="mini-btn" type="button" title="Copy room code">⧉</button></p>
+          <div class="lobby-config">
+            <label>Humans <select id="sel-max-players" class="lobby-input small"></select></label>
+            <label>Bots <select id="sel-bots" class="lobby-input small"></select></label>
+            <label>Arena <select id="sel-arena" class="lobby-input small"></select></label>
+          </div>
+          <ul id="lobby-players" class="lobby-players"></ul>
+          <p id="lobby-status" class="overlay-sub small-text">Waiting for players…</p>
+          <div class="btn-row">
+            <button id="btn-ready" class="arcade-btn secondary" type="button">READY</button>
+            <button id="btn-start-match" class="arcade-btn hidden" type="button">START MATCH</button>
+            <button id="btn-leave-room" class="arcade-btn ghost" type="button">LEAVE</button>
+          </div>
+        </div>
+        <button id="btn-lobby-back" class="arcade-btn ghost" type="button">MAIN MENU</button>
+      </div>
+
+      <!-- ======= Battle-royale end screen ======= -->
+      <div id="overlay-br-end" class="overlay hidden">
+        <h2 id="br-end-title" class="neon-title small victory">MATCH OVER</h2>
+        <p id="br-end-detail" class="overlay-sub"></p>
+        <ul id="br-end-scores" class="lobby-players"></ul>
+        <div class="btn-row">
+          <button id="btn-br-again" class="arcade-btn" type="button">PLAY AGAIN</button>
+          <button id="btn-br-lobby" class="arcade-btn secondary" type="button">RETURN TO LOBBY</button>
+        </div>
+      </div>
+
+      <div id="overlay-pause" class="overlay hidden">
+        <h2 class="neon-title small">PAUSED</h2>
+        <button id="btn-resume" class="arcade-btn" type="button">RESUME</button>
+        <button id="btn-restart-pause" class="arcade-btn secondary" type="button">RESTART</button>
+      </div>
+
+      <div id="overlay-levelclear" class="overlay hidden">
+        <h2 class="neon-title small victory">LEVEL <span id="levelclear-num">1</span> CLEAR</h2>
+        <p class="overlay-sub" id="levelclear-reward">BONUS: +1 LIFE</p>
+        <p class="overlay-sub">Score <span id="levelclear-score">0</span> · Lives <span id="levelclear-lives">3</span></p>
+        <button id="btn-next-level" class="arcade-btn" type="button">NEXT LEVEL ▶</button>
+      </div>
+
+      <div id="overlay-restart-confirm" class="overlay hidden">
+        <h2 class="neon-title small danger">RESTART?</h2>
+        <p class="overlay-sub">Your current run will be reset.</p>
+        <div class="btn-row">
+          <button id="btn-restart-yes" class="arcade-btn" type="button">CONFIRM</button>
+          <button id="btn-restart-no" class="arcade-btn secondary" type="button">CANCEL</button>
+        </div>
+      </div>
+
+      <div id="overlay-gameover" class="overlay hidden">
+        <h2 class="neon-title small danger">GAME OVER</h2>
+        <p class="overlay-sub">Final score: <span id="final-score-loss">0</span></p>
+        <button id="btn-retry" class="arcade-btn" type="button">↻ TRY AGAIN</button>
+      </div>
+
+      <div id="overlay-victory" class="overlay hidden">
+        <h2 class="neon-title small victory">YOU WIN!</h2>
+        <p class="overlay-sub">All ghosts destroyed.<br>Final score: <span id="final-score-win">0</span></p>
+        <button id="btn-restart-win" class="arcade-btn" type="button">↻ PLAY AGAIN</button>
+      </div>
+    </div>
+
+    <!-- ======= Mobile touch controls ======= -->
+    <div id="touch-controls">
+      <div id="dpad">
+        <button class="tbtn up"    data-dir="up"    type="button" aria-label="Up">▲</button>
+        <button class="tbtn left"  data-dir="left"  type="button" aria-label="Left">◀</button>
+        <button class="tbtn down"  data-dir="down"  type="button" aria-label="Down">▼</button>
+        <button class="tbtn right" data-dir="right" type="button" aria-label="Right">▶</button>
+      </div>
+      <div id="action-buttons">
+        <button id="btn-throw-touch" type="button" aria-label="Throw bomb">🎯</button>
+        <button id="btn-bomb-touch" type="button" aria-label="Place bomb">💣</button>
+      </div>
+    </div>
+
+  </div>
+
+  <script src="config.js"></script>
+  <script src="levelgen.js"></script>
+  <script src="game.js"></script>
+</body>
+</html>
