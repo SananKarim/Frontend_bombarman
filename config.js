@@ -1,10 +1,6 @@
-/* Frontend configuration — plain JS so campaign mode also works from file://.
-   SERVER_URL: the authoritative Node.js + Socket.IO game server.
-   - Local separate ports: leave empty. A page at http://HOST:5000 automatically
-     connects to http://HOST:3000, including phones using the computer's LAN IP.
-   - Local single port: leave empty and start with SERVE_PUBLIC=1.
-   - Production: set the full Cloud Run URL (no trailing slash).
-   Firebase Hosting does not proxy WebSockets to Cloud Run. */
+/* Vercel builds generate dist/config.js from MULTIPLAYER_SERVER_URL.
+   This source config is for local/offline use: an HTTP page on port 5000
+   connects to the same hostname on port 3000, including LAN/mobile clients. */
 window.MULTIPLAYER_CONFIG = {
   SERVER_URL: '',
   ROOM_LIMIT_MAX: 8,

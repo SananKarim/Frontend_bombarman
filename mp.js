@@ -53,6 +53,9 @@
     const configured = String(
       (window.MULTIPLAYER_CONFIG || {}).SERVER_URL || '').trim();
     if (configured) return configured.replace(/\/+$/, '');
+    if (location.protocol === 'https:') {
+      throw new Error('Multiplayer backend is not configured — set MULTIPLAYER_SERVER_URL in Vercel and redeploy.');
+    }
     if (location.protocol === 'http:' && location.port && location.port !== '3000') {
       return `${location.protocol}//${location.hostname}:3000`;
     }
@@ -70,7 +73,7 @@
           S.libPromise = null;
           reject(new Error('Cannot reach the game server at '
             + (serverBase() || location.origin)
-            + ' — start it with `cd server && npm start`.'));
+            + ' — check the Render service, or run `cd backend && npm start` locally.'));
         };
         document.body.appendChild(s);
       });
@@ -459,7 +462,7 @@
 
   /* ================= battle royale match ================= */
 
-  /* match:start payload (server/game/sim.js startPayload()):
+  /* match:start payload (backend/game/sim.js startPayload()):
      { arenaSeed, preset, cols, rows,
        roster: [{ id, name, color, isBot, kind }],
        actors: [{ id, x, y }] }  — pixel coordinates, TILE=48. */
@@ -573,7 +576,7 @@
     });
   }
 
-  /* Snapshot contract (server/game/sim.js snapshot()):
+  /* Snapshot contract (backend/game/sim.js snapshot()):
      { seq, t, alive, ended, winnerId,
        actors:[{id,x,y,dx,dy,alive,bombs,bombMax,shield,invuln,tosser,
                 turboMs,warpMs,chaosMs,kills,deaths}],
