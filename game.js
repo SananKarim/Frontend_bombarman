@@ -1217,16 +1217,8 @@ function update(dt) {
   if (p.throwAnim > 0) p.throwAnim = Math.max(0, p.throwAnim - dt);
 
   if (game.net) {
-    // Server-authoritative match: this client never runs gameplay physics.
-    // It mirrors snapshots (mp.js), smooths actors, and uploads input only.
-    updateRemotes(dt);
+    syncNetInput();
     if (hooks.brFrame) hooks.brFrame(dt);
-    let ix = 0, iy = 0;
-    for (const name of [...input.keys, ...input.touchDirs]) {
-      const d = DIRS[name];
-      if (d) { ix = d.x; iy = d.y; p.dir = d; break; }   // first held direction wins
-    }
-    if (hooks.brIntent) hooks.brIntent(ix, iy);
     for (const b of game.bombs) {          // visual-only fuse/flight decay
       b.fuse -= dt;
       if (b.fly) b.fly.t += dt;
@@ -1845,6 +1837,28 @@ function togglePause() {
     game.state = 'playing';
     hideOverlays();
   }
+  syncNetInput(true);
+}
+
+function syncNetInput(force = false) {
+  if (!game.net || !hooks.brIntent) return;
+  let dir = { x: 0, y: 0 };
+  if (game.state === 'playing' && !document.hidden) {
+    for (const directions of [input.keys, input.touchDirs]) {
+      for (const name of directions) {
+        if (DIRS[name]) { dir = DIRS[name]; break; }
+      }
+      if (dir.x || dir.y) break;
+    }
+  }
+  hooks.brIntent(dir.x, dir.y, force);
+}
+
+function clearHeldInput() {
+  input.keys.clear();
+  input.touchDirs.clear();
+  for (const btn of document.querySelectorAll('#dpad .tbtn')) btn.classList.remove('pressed');
+  syncNetInput();
 }
 
 /* ========================= 14. INPUT ========================= */
@@ -1885,7 +1899,7 @@ window.addEventListener('keydown', (e) => {
   if (e.repeat) return;                               // ignore held-key auto-repeat
 
   const dir = KEY_TO_DIR[e.code];
-  if (dir) input.keys.add(dir);
+  if (dir) { input.keys.add(dir); syncNetInput(); }
 
   if (e.code === 'Space') {
     if (game.state === 'start') startGame();
@@ -1915,11 +1929,14 @@ window.addEventListener('keydown', (e) => {
 
 window.addEventListener('keyup', (e) => {
   const dir = KEY_TO_DIR[e.code];
-  if (dir) input.keys.delete(dir);
+  if (dir) { input.keys.delete(dir); syncNetInput(); }
 });
 
-// If the tab loses focus, drop all held keys so nobody "runs" into a wall.
-window.addEventListener('blur', () => input.keys.clear());
+window.addEventListener('blur', clearHeldInput);
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) clearHeldInput();
+  else syncNetInput();
+});
 
 /* ---- Touch controls ---- */
 for (const btn of document.querySelectorAll('#dpad .tbtn')) {
@@ -1929,8 +1946,14 @@ for (const btn of document.querySelectorAll('#dpad .tbtn')) {
     Sfx.ensure();
     input.touchDirs.add(dir);
     btn.classList.add('pressed');
+    btn.setPointerCapture(ev.pointerId);
+    syncNetInput();
   };
-  const release = () => { input.touchDirs.delete(dir); btn.classList.remove('pressed'); };
+  const release = () => {
+    input.touchDirs.delete(dir);
+    btn.classList.remove('pressed');
+    syncNetInput();
+  };
   btn.addEventListener('pointerdown', press);
   btn.addEventListener('pointerup', release);
   btn.addEventListener('pointercancel', release);
@@ -1942,13 +1965,15 @@ document.getElementById('btn-bomb-touch').addEventListener('pointerdown', (ev) =
   Sfx.ensure();
   if (game.state === 'start') startGame();
   else if (game.state === 'levelclear') nextLevel();
+  else if (game.net && hooks.brAction) hooks.brAction('bomb');
   else requestBomb();
 });
 
 document.getElementById('btn-throw-touch').addEventListener('pointerdown', (ev) => {
   ev.preventDefault();
   Sfx.ensure();
-  throwBomb();
+  if (game.net && hooks.brAction) hooks.brAction('throw');
+  else throwBomb();
 });
 
 /* ---- Buttons ---- */
@@ -2090,6 +2115,6 @@ window.BOMBER = {
   game, input, hooks, update, render, updateHud, requestBomb, throwBomb, startGame,
   togglePause, fitCanvas, bfsPath, updateEnemies, scareEnemiesNear,
   resetGame, applyDestroyedCell, applyPowerup, showOverlay, hideOverlays,
-  cellCenter, tileOverlapsPlayer, spawnDebris,
+  cellCenter, tileOverlapsPlayer, spawnDebris, moveEntity, boxBlocked, syncNetInput, clearHeldInput,
   TILE, COLS, ROWS, BOMB_FUSE,
 };

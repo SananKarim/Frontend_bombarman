@@ -22,7 +22,9 @@
   const SESSION_KEY = 'neon-mp-session';        // sessionStorage: resume creds
   const MY_SPEED = 158;                         // cosmetic: own extrapolation
   const TURBO_MULT = 1.55;
-  const EXTRAPOLATE_CAP = 0.12;                 // seconds of dead-reckoning max
+  const EXTRAPOLATE_CAP = 0.12;
+  const INPUT_REFRESH_MS = 250;
+  const INTERPOLATION_MS = 100;
 
   const $ = (id) => document.getElementById(id);
   const g = () => window.BOMBER.game;
@@ -41,7 +43,15 @@
     roster: {},          // actorId → { id, name, color, isBot, kind }
     lastSeq: 0,
     lastSnapAt: 0,
-    lastIntent: '0,0',
+    lastIntent: null,
+    intentX: 0,
+    intentY: 0,
+    inputSeq: 0,
+    lastInputAt: 0,
+    inputTimer: null,
+    connectPromise: null,
+    cancelConnect: null,
+    clockOffset: null,
     myAlive: true,
     busy: false,         // Host/Join click guard while a request is in flight
     wired: false,
@@ -97,8 +107,7 @@
      socket down first, so handlers can never stack up. */
   async function ensureSocket() {
     await loadSocketLib();
-    if (S.socket && S.connected) return;
-    if (S.socket) teardownSocket();
+    if (S.socket) return waitForConnection();
     const sess = loadSession();
     const sk = window.io(serverBase() || undefined, {
       auth: sess ? { code: sess.code, playerId: sess.playerId, token: sess.token } : {},
@@ -108,11 +117,13 @@
     S.socket = sk;
     sk.on('connect', () => {
       S.connected = true;
+      S.lastIntent = null;
       if (!S.code) status('Connected — host or join a room.');
       else if (!S.room) status('Rejoining room…');
     });
     sk.on('disconnect', () => {
       S.connected = false;
+      S.lastIntent = null;
       status('Connection lost — reconnecting…');
       if (S.inMatch) toast('CONNECTION LOST — RETRYING', 2);
     });
@@ -125,9 +136,37 @@
     sk.on('room:resumed', onResumeed);
     sk.on('match:start', joinMatch);
     sk.on('match:snapshot', applySnapshot);
+    return waitForConnection();
+  }
+
+  function waitForConnection() {
+    if (S.connected) return Promise.resolve();
+    if (S.connectPromise) return S.connectPromise;
+    const sk = S.socket;
+    const promise = new Promise((resolve, reject) => {
+      const finish = (error) => {
+        clearTimeout(timer);
+        sk.off('connect', connected);
+        sk.off('connect_error', failed);
+        if (S.socket === sk) S.cancelConnect = null;
+        error ? reject(error) : resolve();
+      };
+      S.cancelConnect = () => finish(new Error('Connection cancelled.'));
+      const connected = () => finish();
+      const failed = () => finish(new Error('Game server unreachable. Is it running?'));
+      const timer = setTimeout(() => finish(new Error('Game server unreachable. Is it running?')), 15000);
+      sk.once('connect', connected);
+      sk.once('connect_error', failed);
+    }).finally(() => { if (S.connectPromise === promise) S.connectPromise = null; });
+    S.connectPromise = promise;
+    return promise;
   }
 
   function teardownSocket() {
+    if (S.cancelConnect) S.cancelConnect();
+    S.connectPromise = null;
+    clearInterval(S.inputTimer);
+    S.inputTimer = null;
     if (S.socket) {
       S.socket.removeAllListeners();
       S.socket.close();
@@ -261,7 +300,9 @@
     S.playerId = res.playerId;
     S.myId = res.playerId;                 // actor id in match payloads == seat id
     S.isHost = res.room.hostUid === res.playerId;
-    saveSession({ code: res.code, playerId: res.playerId, token: res.token });
+    const credentials = { code: res.code, playerId: res.playerId, token: res.token };
+    saveSession(credentials);
+    S.socket.auth = credentials;
     S.room = res.room;
     showLobbyRoom();
     $('lobby-room-code').textContent = res.code;
@@ -273,8 +314,10 @@
   function onResumeed(r) {
     if (!r || !r.ok) {
       clearSession();
+      S.socket.auth = {};
+      if (S.inMatch) { exitMatchScene(); window.BOMBER.showOverlay('lobby'); }
       S.code = null; S.playerId = null; S.myId = null; S.room = null;
-      if (!S.inMatch) { showLobbyHome(); status('Previous session expired — host or join again.'); }
+      showLobbyHome(); status('Previous session expired — host or join again.');
       return;
     }
     S.code = r.room.code;
@@ -284,9 +327,11 @@
     if (r.inMatch && r.matchStart && r.snapshot) {
       joinMatch(r.matchStart);
       applySnapshot(r.snapshot);
+      S.lastIntent = null;
+      window.BOMBER.syncNetInput();
       return;
     }
-    if (S.inMatch) exitMatchScene();       // match is gone but we still hold a seat
+    if (S.inMatch) { exitMatchScene(); window.BOMBER.showOverlay('lobby'); }
     showLobbyRoom();
     $('lobby-room-code').textContent = r.room.code;
     renderLobby();
@@ -296,6 +341,7 @@
     const code = S.code;
     if (S.inMatch) exitMatchScene();
     clearSession();
+    if (S.socket) S.socket.auth = {};
     S.code = null; S.playerId = null; S.myId = null; S.room = null; S.isHost = false;
     showLobbyHome();
     if (code && S.connected) {
@@ -473,7 +519,10 @@
     S.ended = false;
     S.lastSeq = 0;
     S.myAlive = true;
-    S.lastIntent = '0,0';
+    S.lastIntent = null;
+    S.intentX = 0; S.intentY = 0;
+    S.inputSeq = 0;
+    S.clockOffset = null;
 
     const G = window.BOMBER;
     const game = G.game;
@@ -507,6 +556,9 @@
     const p = game.player;
     if (me) { p.x = me.x; p.y = me.y; }
     p.srvX = p.x; p.srvY = p.y;
+    p.predX = p.x; p.predY = p.y;
+    p.correctionX = 0; p.correctionY = 0;
+    p.predTime = 0;
     p.srvDX = 1; p.srvDY = 0;
     p.alive = true; p.dying = 0;
     p.invuln = 1;                                 // blink until the first snapshot
@@ -520,6 +572,12 @@
     G.hooks.brFrame = brFrame;
     G.hooks.brIntent = brIntent;
     G.hooks.brAction = brAction;
+    clearInterval(S.inputTimer);
+    S.inputTimer = setInterval(() => {
+      G.syncNetInput();
+      sendIntent(true);
+    }, INPUT_REFRESH_MS);
+    G.syncNetInput();
 
     S.lastSnapAt = performance.now();
     const feed = $('br-feed');
@@ -528,24 +586,42 @@
     toast('BATTLE ROYALE — LAST BOMBER STANDING', 2.4);
   }
 
-  /* Per-frame smoothing, called from game.js update() in net mode:
-     own actor = server position + short extrapolation along the facing the
-     server saw; remotes lerp toward their server targets in updateRemotes. */
   function brFrame(dt) {
     const game = g();
     const p = game.player;
     if (!p) return;
-    const elapsed = Math.min(EXTRAPOLATE_CAP, (performance.now() - S.lastSnapAt) / 1000);
     const speed = MY_SPEED * (p.speedTimer > 0 ? TURBO_MULT : 1);
-    const live = p.alive === false ? 0 : 1;
-    const tx = (p.srvX != null ? p.srvX : p.x) + (p.srvDX || 0) * speed * elapsed * live;
-    const ty = (p.srvY != null ? p.srvY : p.y) + (p.srvDY || 0) * speed * elapsed * live;
-    const k = Math.min(1, 14 * dt);
-    p.x += (tx - p.x) * k;
-    p.y += (ty - p.y) * k;
-    if (p.alive !== false) {
-      const dx = p.srvDX || 0, dy = p.srvDY || 0;
-      if (dx || dy) p.dir = { x: dx, y: dy };
+    const step = S.connected && p.alive !== false
+      ? Math.max(0, Math.min(dt, EXTRAPOLATE_CAP - p.predTime)) : 0;
+    const predicted = { x: p.predX, y: p.predY };
+    window.BOMBER.moveEntity(predicted, S.intentX * speed * step, S.intentY * speed * step, true);
+    p.predX = predicted.x; p.predY = predicted.y;
+    p.predTime += dt;
+    p.correctionX *= Math.exp(-14 * dt);
+    p.correctionY *= Math.exp(-14 * dt);
+    p.x = p.predX + p.correctionX;
+    p.y = p.predY + p.correctionY;
+    if (window.BOMBER.boxBlocked(p.x, p.y, true, p)) {
+      p.x = p.predX; p.y = p.predY;
+      p.correctionX = 0; p.correctionY = 0;
+    }
+    if (S.intentX || S.intentY) p.dir = { x: S.intentX, y: S.intentY };
+    const half = window.BOMBER.TILE * 0.36;
+    for (const b of game.bombs) {
+      if (b.escapePlayer && (p.predX + half <= b.cellX * 48 ||
+          p.predX - half >= (b.cellX + 1) * 48 || p.predY + half <= b.cellY * 48 ||
+          p.predY - half >= (b.cellY + 1) * 48)) b.escapePlayer = false;
+    }
+    const renderTime = performance.now() - S.clockOffset - INTERPOLATION_MS;
+    for (const r of game.remotes) {
+      const samples = r.samples;
+      if (!samples || !samples.length) continue;
+      while (samples.length > 2 && samples[1].t <= renderTime) samples.shift();
+      const a = samples[0], b = samples[1] || a;
+      const fraction = b.t > a.t ? Math.max(0, Math.min(1, (renderTime - a.t) / (b.t - a.t))) : 0;
+      r.x = a.x + (b.x - a.x) * fraction;
+      r.y = a.y + (b.y - a.y) * fraction;
+      r.dir = { x: r.dirX, y: r.dirY };
     }
     if (p.droneTimer > 0 && p.droneTX != null) {
       const dk = Math.min(1, 10 * dt);
@@ -555,18 +631,26 @@
     for (const pk of game.pickups) pk.age += dt;   // keep the bob animating
   }
 
-  /* Direction changes are uploaded as soon as they happen; the server
-     samples the latest intent each simulation tick. */
-  function brIntent(vx, vy) {
-    const key = `${vx},${vy}`;
-    if (key === S.lastIntent) return;
+  function brIntent(vx, vy, force) {
+    S.intentX = vx; S.intentY = vy;
+    if (force) S.lastIntent = null;
+    sendIntent(false);
+  }
+
+  function sendIntent(refresh) {
+    if (!S.inMatch || S.ended || !S.socket || !S.connected) return;
+    const key = `${S.intentX},${S.intentY}`;
+    const now = performance.now();
+    if (key === S.lastIntent && (!refresh || now - S.lastInputAt < INPUT_REFRESH_MS - 10)) return;
+    S.socket.volatile.emit('game:input', {
+      type: 'move', dirX: S.intentX, dirY: S.intentY, seq: ++S.inputSeq,
+    });
     S.lastIntent = key;
-    if (S.socket && S.connected) {
-      S.socket.emit('game:input', { type: 'move', dirX: vx, dirY: vy });
-    }
+    S.lastInputAt = now;
   }
 
   function brAction(kind) {
+    if (!S.inMatch || S.ended || g().state !== 'playing' || !S.myAlive) return;
     request('game:action', { type: kind }).catch((e) => {
       const code = e.code;
       if (code === 'no-bomb') toast('NO ROOM FOR ANOTHER BOMB', 1.2);
@@ -589,6 +673,12 @@
     if (s.seq <= S.lastSeq) return;               // ignore stale/out-of-order
     S.lastSeq = s.seq;
     S.lastSnapAt = performance.now();
+    const offset = S.lastSnapAt - s.t;
+    if (S.clockOffset == null || Math.abs(offset - S.clockOffset) > INTERPOLATION_MS * 2) {
+      S.clockOffset = offset;
+    } else {
+      S.clockOffset += (offset - S.clockOffset) * 0.1;
+    }
 
     const TILE = window.BOMBER.TILE;
     const p = game.player;
@@ -600,7 +690,11 @@
       if (a.id === S.myId) {
         meA = a;
         p.srvX = a.x; p.srvY = a.y;
+        p.correctionX = Math.max(-24, Math.min(24, p.x - a.x));
+        p.correctionY = Math.max(-24, Math.min(24, p.y - a.y));
+        p.predX = a.x; p.predY = a.y; p.predTime = 0;
         p.srvDX = a.dx; p.srvDY = a.dy;
+        S.inputSeq = Math.max(S.inputSeq, a.inputSeq || 0);
         p.alive = a.alive;
         p.netBombs = a.bombs; p.netKills = a.kills; p.bombMax = a.bombMax;
         p.shield = !!a.shield; p.tosser = !!a.tosser;
@@ -612,6 +706,9 @@
         const r = byRemote[a.id];
         if (r) {
           r.tx = a.x; r.ty = a.y;
+          if (!r.samples) r.samples = [];
+          r.samples.push({ t: s.t, x: a.x, y: a.y });
+          if (r.samples.length > 8) r.samples.shift();
           r.dirX = a.dx; r.dirY = a.dy;
           r.alive = a.alive;
         }
@@ -628,7 +725,8 @@
     game.bombs = (s.bombs || []).map((b) => {
       const out = { uid: b.uid, owner: b.owner, cellX: b.cellX, cellY: b.cellY,
         range: b.range, fuse: b.fuseMs >= 0 ? b.fuseMs / 1000 : 3,
-        remote: true, dir: { x: 0, y: 0 } };
+        remote: true, escapePlayer: !!b.escape && b.owner === S.myId,
+        dir: { x: 0, y: 0 } };
       if (b.flight) {
         const f = b.flight;
         out.cellX = Math.round((f.tx - TILE / 2) / TILE);
@@ -643,9 +741,11 @@
     game.flames = (s.flames || []).map((f) => ({
       cellX: f.x, cellY: f.y, life: f.m / 1000, shape: f.s, kind: f.k,
     }));
+    const pickupAges = new Map(game.pickups.map((pk) => [pk.uid, pk.age]));
     game.pickups = (s.pickups || []).map((pk) => ({
-      cellX: pk.x, cellY: pk.y, type: pk.type, age: 0,
+      uid: pk.uid, cellX: pk.x, cellY: pk.y, type: pk.type, age: pickupAges.get(pk.uid) || 0,
     }));
+    for (const [x, y] of s.fullDestroyed || []) window.BOMBER.applyDestroyedCell(x, y);
     for (const [x, y] of s.destroyed || []) window.BOMBER.applyDestroyedCell(x, y);
     for (const ev of s.events || []) handleEvent(ev);
 
@@ -686,6 +786,8 @@
   function endMatch(s) {
     if (S.ended) return;
     S.ended = true;
+    clearInterval(S.inputTimer);
+    S.inputTimer = null;
     const game = g();
     game.state = 'gameover';                      // freeze local input; overlay takes over
     const winner = s && s.winnerId ? S.roster[s.winnerId] : null;
@@ -735,7 +837,10 @@
     const game = G.game;
     S.inMatch = false;
     S.ended = false;
-    S.lastIntent = '0,0';
+    G.clearHeldInput();
+    S.lastIntent = null;
+    clearInterval(S.inputTimer);
+    S.inputTimer = null;
     game.net = false;
     game.mode = 'campaign';
     game.state = 'start';

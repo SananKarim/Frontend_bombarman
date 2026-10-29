@@ -5,6 +5,7 @@
   "engines": { "node": ">=22" },
   "scripts": {
     "build": "node build.js",
+    "test": "node --test test/*.test.js",
     "lint": "node --check build.js && node --check config.js && node --check levelgen.js && node --check game.js && node --check mp.js"
   }
 }
